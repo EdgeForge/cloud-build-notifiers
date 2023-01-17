@@ -1,3 +1,24 @@
 {
-    "buildStatus": "{{.Build.Status}}"
-}
+    "data": {
+      "attributes": {
+        "message": "Custom message",
+	"status": "{{.Build.Status}}
+      },
+      "type":"runs",
+      "relationships": {
+        "workspace": {
+          "data": {
+            "type": "workspaces",
+            "id": "{{.Params.TFWorkspaceID}}"
+          }
+        },
+        "configuration-version": {
+          "data": {
+            "type": "configuration-versions",
+            "id": "{{.Params.TFConfigID}}"
+          }
+        }
+      }
+    }
+  }
+  
