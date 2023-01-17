@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"text/template"
 
@@ -29,20 +30,22 @@ import (
 )
 
 func main() {
+	log.Infoln("Ye olde build notifier has begun")
 	if err := notifiers.Main(new(httpNotifier)); err != nil {
-		log.Fatalf("fatal error: %v", err)
+		log.Fatalf("starting up fatal error: %v", err)
 	}
 }
 
 type httpNotifier struct {
 	filter   notifiers.EventFilter
-	tmpl     *template.Template
-	url      string
 	br       notifiers.BindingResolver
+	tmpl     *template.Template
 	tmplView *notifiers.TemplateView
+	url      string
 }
 
 func (h *httpNotifier) SetUp(_ context.Context, cfg *notifiers.Config, httpTemplate string, _ notifiers.SecretGetter, br notifiers.BindingResolver) error {
+	log.Infoln("setup build notifier")
 	prd, err := notifiers.MakeCELPredicate(cfg.Spec.Notification.Filter)
 	if err != nil {
 		return fmt.Errorf("failed to create CELPredicate: %w", err)
@@ -54,7 +57,10 @@ func (h *httpNotifier) SetUp(_ context.Context, cfg *notifiers.Config, httpTempl
 	if !ok {
 		return fmt.Errorf("expected delivery config %v to have string field `url`", cfg.Spec.Notification.Delivery)
 	}
-	h.url = url
+	// in case the URL uses any envs in its path
+	h.url = os.ExpandEnv(url)
+	log.Infof("url endpoint: %s", h.url)
+	log.Infof("http template: %s", httpTemplate)
 	tmpl, err := template.New("http_template").Parse(httpTemplate)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %v", err)
@@ -69,13 +75,15 @@ func (h *httpNotifier) SendNotification(ctx context.Context, build *cbpb.Build) 
 		log.V(2).Infof("not sending HTTP request for event (build id = %s, status = %v)", build.Id, build.Status)
 		return nil
 	}
-
+	log.Infof("received build info: %+v", build)
 	log.Infof("sending HTTP request for event (build id = %s, status = %s)", build.Id, build.Status)
 
 	bindings, err := h.br.Resolve(ctx, nil, build)
 	if err != nil {
 		return fmt.Errorf("failed to resolve bindings: %w", err)
 	}
+	log.Infof("bindings are: %+v", bindings)
+	bearerToken := bindings["BEARER_TOKEN"]
 	h.tmplView = &notifiers.TemplateView{
 		Build:  &notifiers.BuildView{Build: build},
 		Params: bindings,
@@ -87,21 +95,20 @@ func (h *httpNotifier) SendNotification(ctx context.Context, build *cbpb.Build) 
 	}
 	build.LogUrl = logURL
 
-	payload := new(bytes.Buffer)
 	var buf bytes.Buffer
 	if err := h.tmpl.Execute(&buf, h.tmplView); err != nil {
-		return err
+		return fmt.Errorf("template render failed: %w", err)
 	}
-	err = json.NewEncoder(payload).Encode(buf)
-	if err != nil {
-		return fmt.Errorf("failed to encode payload: %w", err)
+	if !json.Valid(buf.Bytes()) {
+		return fmt.Errorf("invalid json payload: %s", buf.String())
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.url, strings.NewReader(buf.String()))
 	if err != nil {
 		return fmt.Errorf("failed to create a new HTTP request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/vnd.api+json")
 	req.Header.Set("User-Agent", "GCB-Notifier/0.1 (http)")
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to make HTTP request: %w", err)
